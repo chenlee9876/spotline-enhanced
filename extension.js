@@ -110,6 +110,8 @@ const MusicLyricsIndicator = GObject.registerClass(
             this._lyricsCache = new Map();
             this._soupSession = new Soup.Session();
             this._isPlaying = false;
+            this._debounceTimeoutId = null;
+            this._retryTimeoutId = null;
 
             // Internal state for lyrics
             this._showLyrics = true;
@@ -493,6 +495,7 @@ const MusicLyricsIndicator = GObject.registerClass(
         }
 
         _onPropertiesChanged() {
+            // Handle playback status changes immediately (pause/resume)
             const wasPlaying = this._isPlaying;
             try {
                 const status = this._playerProxy.get_cached_property('PlaybackStatus');
@@ -502,22 +505,29 @@ const MusicLyricsIndicator = GObject.registerClass(
             }
 
             if (wasPlaying && !this._isPlaying) {
-                // Paused: stop timers
                 this._stopKaraokeAnimation();
                 if (this._lyricsTimeoutId) {
                     GLib.source_remove(this._lyricsTimeoutId);
                     this._lyricsTimeoutId = null;
                 }
             } else if (!wasPlaying && this._isPlaying) {
-                // Resumed: restart lyrics display
                 if (this._currentLyrics && this._currentLyrics.length > 0) {
                     this._currentLyricIndex = -1;
                     this._scheduleNextLyricUpdate();
                 }
             }
 
-            this._updateTrackInfo();
             this._updatePlayPauseButton();
+
+            // Debounce track info updates — Spotify fires multiple rapid changes on track switch
+            if (this._debounceTimeoutId) {
+                GLib.source_remove(this._debounceTimeoutId);
+            }
+            this._debounceTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 200, () => {
+                this._debounceTimeoutId = null;
+                this._updateTrackInfo();
+                return GLib.SOURCE_REMOVE;
+            });
         }
 
         _updateTrackInfo() {
@@ -565,11 +575,17 @@ const MusicLyricsIndicator = GObject.registerClass(
             }
         }
 
-        _fetchLyrics(title, artist) {
+        _fetchLyrics(title, artist, isRetry = false) {
             // Clear any existing lyrics timeout
             if (this._lyricsTimeoutId) {
                 GLib.source_remove(this._lyricsTimeoutId);
                 this._lyricsTimeoutId = null;
+            }
+
+            // Clear pending retry
+            if (this._retryTimeoutId) {
+                GLib.source_remove(this._retryTimeoutId);
+                this._retryTimeoutId = null;
             }
 
             // Check cache first
@@ -586,6 +602,9 @@ const MusicLyricsIndicator = GObject.registerClass(
                 return;
             }
 
+            // Show loading state
+            this._updateLabelText('Loading...');
+
             // Step 1: Search song on NetEase to get song ID
             const searchUrl = `${NETEASE_SEARCH_URL}?s=${encodeURIComponent(title + ' ' + artist)}&type=1&limit=1`;
             const searchMsg = Soup.Message.new('GET', searchUrl);
@@ -595,7 +614,7 @@ const MusicLyricsIndicator = GObject.registerClass(
                 try {
                     const bytes = sess.send_and_read_finish(result);
                     if (searchMsg.get_status() !== Soup.Status.OK) {
-                        this._updateLabelText(`${artist} - ${title}`);
+                        this._onFetchFailed(title, artist, isRetry);
                         return;
                     }
 
@@ -609,15 +628,28 @@ const MusicLyricsIndicator = GObject.registerClass(
                     }
 
                     const songId = songs[0].id;
-                    this._fetchNeteaseLyric(songId, title, artist);
+                    this._fetchNeteaseLyric(songId, title, artist, isRetry);
                 } catch (e) {
                     logError(e, 'Failed to search lyrics');
-                    this._updateLabelText(`${artist} - ${title}`);
+                    this._onFetchFailed(title, artist, isRetry);
                 }
             });
         }
 
-        _fetchNeteaseLyric(songId, title, artist) {
+        _onFetchFailed(title, artist, isRetry) {
+            if (!isRetry) {
+                // Retry once after 2 seconds
+                this._retryTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2000, () => {
+                    this._retryTimeoutId = null;
+                    this._fetchLyrics(title, artist, true);
+                    return GLib.SOURCE_REMOVE;
+                });
+            } else {
+                this._updateLabelText(`${artist} - ${title}`);
+            }
+        }
+
+        _fetchNeteaseLyric(songId, title, artist, isRetry = false) {
             // Step 2: Fetch lyrics by song ID
             const lyricUrl = `${NETEASE_LYRIC_URL}?id=${songId}&lv=1`;
             const lyricMsg = Soup.Message.new('GET', lyricUrl);
@@ -627,7 +659,7 @@ const MusicLyricsIndicator = GObject.registerClass(
                 try {
                     const bytes = sess.send_and_read_finish(result);
                     if (lyricMsg.get_status() !== Soup.Status.OK) {
-                        this._updateLabelText(`${artist} - ${title}`);
+                        this._onFetchFailed(title, artist, isRetry);
                         return;
                     }
 
@@ -651,7 +683,7 @@ const MusicLyricsIndicator = GObject.registerClass(
                     }
                 } catch (e) {
                     logError(e, 'Failed to fetch lyrics');
-                    this._updateLabelText(`${artist} - ${title}`);
+                    this._onFetchFailed(title, artist, isRetry);
                 }
             });
         }
@@ -743,7 +775,19 @@ const MusicLyricsIndicator = GObject.registerClass(
                                     const lineText = this._currentLyrics[currentIndex].text;
                                     this._currentLine = lineText;
                                     const karaokeOn = this._settings.get_boolean('karaoke-enabled');
+
+                                    // Fade in on line change
+                                    this._baseLabel.opacity = 0;
+                                    this._highlightLabel.opacity = 0;
                                     this._updateLabelText(lineText, karaokeOn);
+                                    this._baseLabel.ease({
+                                        opacity: 255, duration: 120,
+                                        mode: Clutter.AnimationMode.EASE_IN_QUAD
+                                    });
+                                    this._highlightLabel.ease({
+                                        opacity: 255, duration: 120,
+                                        mode: Clutter.AnimationMode.EASE_IN_QUAD
+                                    });
 
                                     if (karaokeOn) {
                                         // Karaoke timing: current line start → next line start
@@ -892,6 +936,16 @@ const MusicLyricsIndicator = GObject.registerClass(
             }
 
             this._stopKaraokeAnimation();
+
+            if (this._debounceTimeoutId) {
+                GLib.source_remove(this._debounceTimeoutId);
+                this._debounceTimeoutId = null;
+            }
+
+            if (this._retryTimeoutId) {
+                GLib.source_remove(this._retryTimeoutId);
+                this._retryTimeoutId = null;
+            }
 
             if (this._propertiesChangedId && this._playerProxy) {
                 this._playerProxy.disconnect(this._propertiesChangedId);
