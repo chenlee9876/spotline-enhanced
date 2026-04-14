@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.spotify-lyrics" path="/org/gnome/shell/extensions/spotify-lyrics/">
+    <key name="position-in-panel" type="s">
+      <default>'right'</default>
+      <summary>Position in Panel</summary>
+      <description>Where to place the indicator in the panel (left, center, right)</description>
+      <choices>
+        <choice value='left'/>
+        <choice value='center'/>
+        <choice value='right'/>
+      </choices>
+    </key>
+    <key name="max-text-length" type="i">
+      <default>80</default>
+      <range min="10" max="200"/>
+      <summary>Max Text Length</summary>
+      <description>Maximum number of characters to display</description>
+    </key>
+    <key name="font-size" type="i">
+      <default>17</default>
+      <range min="10" max="30"/>
+      <summary>Font Size</summary>
+      <description>Lyrics font size in pixels</description>
+    </key>
+    <key name="max-width" type="i">
+      <default>900</default>
+      <range min="200" max="2000"/>
+      <summary>Max Width</summary>
+      <description>Maximum display width in pixels</description>
+    </key>
+    <key name="highlight-color" type="s">
+      <default>'#56d1ff'</default>
+      <summary>Highlight Color</summary>
+      <description>Karaoke highlight color (hex)</description>
+    </key>
+    <key name="base-color" type="s">
+      <default>'rgba(255,255,255,0.4)'</default>
+      <summary>Base Color</summary>
+      <description>Base lyrics color</description>
+    </key>
+    <key name="karaoke-enabled" type="b">
+      <default>true</default>
+      <summary>Karaoke Effect</summary>
+      <description>Enable karaoke sweep animation</description>
+    </key>
+  </schema>
+</schemalist>
