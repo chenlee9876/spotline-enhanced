@@ -16,25 +16,11 @@ const MPRIS_PLAYER_INTERFACE = 'org.mpris.MediaPlayer2.Player';
 const NETEASE_SEARCH_URL = 'https://music.163.com/api/search/get';
 const NETEASE_LYRIC_URL = 'https://music.163.com/api/song/lyric';
 
-// Helper function to check if a bus name is a supported music player
+const LYRICS_CACHE_MAX = 50;
+
+// Accept any MPRIS player
 function isSupportedPlayer(busName) {
-    // Desktop apps
-    if (busName === 'org.mpris.MediaPlayer2.spotify' ||
-        busName === 'org.mpris.MediaPlayer2.youtube-music') {
-        return true;
-    }
-
-    // Browser-based players (chromium, chrome, firefox, etc.)
-    // These have instance IDs like: org.mpris.MediaPlayer2.chromium.instance12345
-    const browserPatterns = [
-        /^org\.mpris\.MediaPlayer2\.chromium\.instance\d+$/,
-        /^org\.mpris\.MediaPlayer2\.chrome\.instance\d+$/,
-        /^org\.mpris\.MediaPlayer2\.firefox\.instance\d+$/,
-        /^org\.mpris\.MediaPlayer2\.brave\.instance\d+$/,
-        /^org\.mpris\.MediaPlayer2\.edge\.instance\d+$/
-    ];
-
-    return browserPatterns.some(pattern => pattern.test(busName));
+    return busName.startsWith('org.mpris.MediaPlayer2.');
 }
 
 const MusicLyricsIndicator = GObject.registerClass(
@@ -122,6 +108,8 @@ const MusicLyricsIndicator = GObject.registerClass(
             this._currentBusName = null;
             this._busWatchId = null;
             this._lyricsCache = new Map();
+            this._soupSession = new Soup.Session();
+            this._isPlaying = false;
 
             // Internal state for lyrics
             this._showLyrics = true;
@@ -505,6 +493,29 @@ const MusicLyricsIndicator = GObject.registerClass(
         }
 
         _onPropertiesChanged() {
+            const wasPlaying = this._isPlaying;
+            try {
+                const status = this._playerProxy.get_cached_property('PlaybackStatus');
+                this._isPlaying = status ? status.unpack() === 'Playing' : false;
+            } catch (e) {
+                this._isPlaying = false;
+            }
+
+            if (wasPlaying && !this._isPlaying) {
+                // Paused: stop timers
+                this._stopKaraokeAnimation();
+                if (this._lyricsTimeoutId) {
+                    GLib.source_remove(this._lyricsTimeoutId);
+                    this._lyricsTimeoutId = null;
+                }
+            } else if (!wasPlaying && this._isPlaying) {
+                // Resumed: restart lyrics display
+                if (this._currentLyrics && this._currentLyrics.length > 0) {
+                    this._currentLyricIndex = -1;
+                    this._scheduleNextLyricUpdate();
+                }
+            }
+
             this._updateTrackInfo();
             this._updatePlayPauseButton();
         }
@@ -577,11 +588,10 @@ const MusicLyricsIndicator = GObject.registerClass(
 
             // Step 1: Search song on NetEase to get song ID
             const searchUrl = `${NETEASE_SEARCH_URL}?s=${encodeURIComponent(title + ' ' + artist)}&type=1&limit=1`;
-            const session = new Soup.Session();
             const searchMsg = Soup.Message.new('GET', searchUrl);
             searchMsg.get_request_headers().append('User-Agent', 'Mozilla/5.0');
 
-            session.send_and_read_async(searchMsg, GLib.PRIORITY_DEFAULT, null, (sess, result) => {
+            this._soupSession.send_and_read_async(searchMsg, GLib.PRIORITY_DEFAULT, null, (sess, result) => {
                 try {
                     const bytes = sess.send_and_read_finish(result);
                     if (searchMsg.get_status() !== Soup.Status.OK) {
@@ -599,7 +609,7 @@ const MusicLyricsIndicator = GObject.registerClass(
                     }
 
                     const songId = songs[0].id;
-                    this._fetchNeteaseLyric(session, songId, title, artist);
+                    this._fetchNeteaseLyric(songId, title, artist);
                 } catch (e) {
                     logError(e, 'Failed to search lyrics');
                     this._updateLabelText(`${artist} - ${title}`);
@@ -607,13 +617,13 @@ const MusicLyricsIndicator = GObject.registerClass(
             });
         }
 
-        _fetchNeteaseLyric(session, songId, title, artist) {
+        _fetchNeteaseLyric(songId, title, artist) {
             // Step 2: Fetch lyrics by song ID
             const lyricUrl = `${NETEASE_LYRIC_URL}?id=${songId}&lv=1`;
             const lyricMsg = Soup.Message.new('GET', lyricUrl);
             lyricMsg.get_request_headers().append('User-Agent', 'Mozilla/5.0');
 
-            session.send_and_read_async(lyricMsg, GLib.PRIORITY_DEFAULT, null, (sess, result) => {
+            this._soupSession.send_and_read_async(lyricMsg, GLib.PRIORITY_DEFAULT, null, (sess, result) => {
                 try {
                     const bytes = sess.send_and_read_finish(result);
                     if (lyricMsg.get_status() !== Soup.Status.OK) {
@@ -628,7 +638,7 @@ const MusicLyricsIndicator = GObject.registerClass(
                     const cacheKey = `${artist}::${title}`;
                     if (lrcText) {
                         this._currentLyrics = this._parseLRC(lrcText);
-                        this._lyricsCache.set(cacheKey, this._currentLyrics);
+                        this._setCacheEntry(cacheKey, this._currentLyrics);
                         this._currentLyricIndex = -1;
                         if (this._currentLyrics.length > 0) {
                             this._startLyricsDisplay();
@@ -636,7 +646,7 @@ const MusicLyricsIndicator = GObject.registerClass(
                             this._updateLabelText(`${artist} - ${title}`);
                         }
                     } else {
-                        this._lyricsCache.set(cacheKey, []);
+                        this._setCacheEntry(cacheKey, []);
                         this._updateLabelText(`${artist} - ${title}`);
                     }
                 } catch (e) {
@@ -781,43 +791,54 @@ const MusicLyricsIndicator = GObject.registerClass(
         }
 
         _startKaraokeAnimation() {
+            // Record the wall-clock time and player position at animation start
+            // to interpolate locally without DBus calls every frame
+            this._karaokeWallStart = GLib.get_monotonic_time() / 1000; // ms
+            this._karaokePositionAtStart = this._karaokeLineStart;
+
+            // Sync once from DBus to get accurate starting position
+            try {
+                this._proxy.call(
+                    'Get',
+                    new GLib.Variant('(ss)', [MPRIS_PLAYER_INTERFACE, 'Position']),
+                    Gio.DBusCallFlags.NONE,
+                    -1,
+                    null,
+                    (proxy, result) => {
+                        try {
+                            const reply = proxy.call_finish(result);
+                            const positionMs = reply.get_child_value(0).get_variant().get_int64() / 1000;
+                            this._karaokeWallStart = GLib.get_monotonic_time() / 1000;
+                            this._karaokePositionAtStart = positionMs;
+                        } catch (e) {
+                            // use defaults set above
+                        }
+                    }
+                );
+            } catch (e) {
+                // use defaults
+            }
+
             this._karaokeTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 33, () => {
-                if (!this._proxy) {
+                const duration = this._karaokeLineEnd - this._karaokeLineStart;
+                if (duration <= 0) {
                     this._karaokeTimeoutId = null;
                     return GLib.SOURCE_REMOVE;
                 }
 
-                try {
-                    this._proxy.call(
-                        'Get',
-                        new GLib.Variant('(ss)', [MPRIS_PLAYER_INTERFACE, 'Position']),
-                        Gio.DBusCallFlags.NONE,
-                        -1,
-                        null,
-                        (proxy, result) => {
-                            try {
-                                const reply = proxy.call_finish(result);
-                                const positionUs = reply.get_child_value(0).get_variant().get_int64();
-                                const positionMs = positionUs / 1000;
+                // Interpolate position from wall clock
+                const wallNow = GLib.get_monotonic_time() / 1000;
+                const estimatedPosition = this._karaokePositionAtStart + (wallNow - this._karaokeWallStart);
+                const elapsed = estimatedPosition - this._karaokeLineStart;
+                const progress = Math.min(1.0, Math.max(0.0, elapsed / duration));
 
-                                const duration = this._karaokeLineEnd - this._karaokeLineStart;
-                                if (duration <= 0) return;
+                const totalWidth = this._highlightLabel.get_width();
+                const totalHeight = this._highlightLabel.get_height();
+                this._highlightLabel.set_clip(0, 0, totalWidth * progress, totalHeight);
 
-                                const elapsed = positionMs - this._karaokeLineStart;
-                                const progress = Math.min(1.0, Math.max(0.0, elapsed / duration));
-
-                                const totalWidth = this._highlightLabel.get_width();
-                                const totalHeight = this._highlightLabel.get_height();
-                                const clipWidth = totalWidth * progress;
-
-                                this._highlightLabel.set_clip(0, 0, clipWidth, totalHeight);
-                            } catch (e) {
-                                // ignore
-                            }
-                        }
-                    );
-                } catch (e) {
-                    // ignore
+                if (progress >= 1.0) {
+                    this._karaokeTimeoutId = null;
+                    return GLib.SOURCE_REMOVE;
                 }
 
                 return GLib.SOURCE_CONTINUE;
@@ -839,6 +860,15 @@ const MusicLyricsIndicator = GObject.registerClass(
                 // Non-lyric text: show highlight fully, base dim
                 this._highlightLabel.remove_clip();
             }
+        }
+
+        _setCacheEntry(key, value) {
+            if (this._lyricsCache.size >= LYRICS_CACHE_MAX) {
+                // Remove oldest entry (first key in Map iteration order)
+                const oldest = this._lyricsCache.keys().next().value;
+                this._lyricsCache.delete(oldest);
+            }
+            this._lyricsCache.set(key, value);
         }
 
         _truncateText(text, maxLength) {
@@ -875,6 +905,10 @@ const MusicLyricsIndicator = GObject.registerClass(
 
             this._proxy = null;
             this._playerProxy = null;
+            if (this._soupSession) {
+                this._soupSession.abort();
+                this._soupSession = null;
+            }
             this._lyricsCache.clear();
             super.destroy();
         }
