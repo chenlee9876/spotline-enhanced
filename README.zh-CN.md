@@ -7,7 +7,6 @@
 基于 [SpotLine](https://github.com/d3osaju/Spotline)（作者 deosaju）进行增强开发。
 
 ![卡拉OK 歌词效果](screenshots/topbar-karaoke.png)
-![卡拉OK 歌词效果](screenshots/topbar-karaoke-2.png)
 
 ## 功能特性
 
