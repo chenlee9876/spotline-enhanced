@@ -1,7 +1,7 @@
 #!/bin/bash
 set -e
 
-EXT_UUID="spotify-lyrics@gnome-shell-extension"
+EXT_UUID="spotline-enhanced@chenlee9876"
 EXT_DIR="$HOME/.local/share/gnome-shell/extensions/$EXT_UUID"
 
 echo "Installing SpotLine Enhanced to $EXT_DIR ..."
