@@ -6,6 +6,9 @@ A GNOME Shell extension that displays synchronized lyrics with karaoke animation
 
 Fork of [SpotLine](https://github.com/d3osaju/Spotline) by deosaju, with significant enhancements.
 
+![Karaoke lyrics in top bar](screenshots/topbar-karaoke.png)
+![Karaoke lyrics in top bar](screenshots/topbar-karaoke-2.png)
+
 ## Features
 
 - **Karaoke sweep effect** - lyrics highlight progressively as the song plays
@@ -53,6 +56,8 @@ gnome-extensions prefs spotline-enhanced@chenlee9876
 ```
 
 Or use the GNOME Extensions app / Extension Manager.
+
+![Preferences](screenshots/preferences.png)
 
 ## Changes from Original SpotLine
 

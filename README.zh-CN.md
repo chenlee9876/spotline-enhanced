@@ -6,6 +6,9 @@
 
 基于 [SpotLine](https://github.com/d3osaju/Spotline)（作者 deosaju）进行增强开发。
 
+![卡拉OK 歌词效果](screenshots/topbar-karaoke.png)
+![卡拉OK 歌词效果](screenshots/topbar-karaoke-2.png)
+
 ## 功能特性
 
 - **卡拉OK 填充效果** — 歌词随播放进度从左到右逐渐高亮
@@ -53,6 +56,8 @@ gnome-extensions prefs spotline-enhanced@chenlee9876
 ```
 
 或使用 GNOME Extensions 应用 / Extension Manager。
+
+![设置界面](screenshots/preferences.png)
 
 ## 与原版 SpotLine 的对比
 
