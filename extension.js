@@ -764,6 +764,9 @@ const MusicLyricsIndicator = GObject.registerClass(
                                 return GLib.SOURCE_REMOVE;
                             });
                         } catch (e) {
+                            if (this._lyricsTimeoutId) {
+                                GLib.source_remove(this._lyricsTimeoutId);
+                            }
                             this._lyricsTimeoutId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 1000, () => {
                                 this._lyricsTimeoutId = null;
                                 this._scheduleNextLyricUpdate();
